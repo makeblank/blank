@@ -204,8 +204,10 @@ func newSource(n, p string, ops []string, js []byte) (s *cfg.Source, err error) 
 
 	if p == "" && kind != reflect.Map {
 		return nil, fmt.Errorf("json must be an object if path is omitted")
-	} else {
+	} else if p != "" {
 		map_ = cfg.PointerToMap(p, data)
+	} else {
+		map_ = data.(map[string]interface{})
 	}
 
 	file = &cfg.File{
