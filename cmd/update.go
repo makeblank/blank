@@ -1,8 +1,15 @@
 package cmd
 
 import (
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"reflect"
 	"strings"
+
+	"github.com/imdario/mergo"
+	"github.com/makeblank/blank/cfg"
 
 	. "github.com/makeblank/blank/arg"
 	. "github.com/makeblank/blank/std"
@@ -10,44 +17,33 @@ import (
 
 const UpdateCommandName = "update"
 
-const updateCommandInfo = `
-Target must be an existing JSON/YAML file. The data it
+const updateExtraInfo = `
+Target must be an existing config file. The data it
 represents will be updated according to the specified
 operations and then written to stdout.
 
 The path argument to operation flags must be a path to a
 member in target data (e.g. "/path/to/member"). If it is
-ommitted, the operation is applied to the entire data.
+ommitted, json must be an object and the operation is
+applied to the entire target data.
 
 The json argument must be a JSON string, or a path to a
-JSON/YAML file by prefixing it with an "@" sign.
+config file by prefixing it with an "@" sign.
 
 Examples:
   blank update package.json -s /dependencies/eslint '"^7"'
-  blank update .eslintrc.json -a /extends '"standard"'
+  blank update .eslintrc.json -a /extends '["standard"]'
   blank update config.yaml -m @base.yaml
 `
 
 var (
-	updateCommandHelp string
+	updateExtraHelp  string
+	updateOperations []string
 
-	operationFlags = []string{
-		"-sam", "--set", "--append", "--merge",
-	}
-
-	outputTypes = []string{
-		"json", "yaml",
-	}
-
-	outputTypesStr   = strings.Join(outputTypes, ", ")
-	outputTypesError = fmt.Sprintf("must be: %s", outputTypesStr)
+	fileTypes    = []string{"json", "yaml"}
+	fileTypesStr = strings.Join(fileTypes, ", ")
+	fileTypesErr = fmt.Sprintf("must be: %s", fileTypesStr)
 )
-
-type Operation struct {
-	Ops  []string
-	Path string
-	Json string
-}
 
 // The "update" subcommand type.
 type UpdateCommand struct {
@@ -67,22 +63,30 @@ func (c *UpdateCommand) Info() *Info {
 }
 
 func (c *UpdateCommand) Help() string {
-	return updateCommandHelp
+	return updateExtraHelp
 }
 
 func (c *UpdateCommand) Run(args []string) error {
 	var (
-		target, a, b string
-		ops          []string
-		operations   []*Operation
-		output       = "json"
+		target, a, b, t string
+		ops             []string
+		sources         []*cfg.Source
+		input           = "json"
+		output          = "json"
+		o               = 0
 	)
 
-	operations = make([]*Operation, 0)
+	sources = make([]*cfg.Source, 0)
 
-	if a, args = NextFlag(args, "-t", "--type"); Ok(a) {
-		if output, args = NextArg(args, outputTypes...); Empty(output) {
-			return FlagError(outputTypesError, "-t")
+	if a, args = NextFlag(args, "-io", "--in", "--out"); Ok(a) {
+		if t, args = NextArg(args, fileTypes...); Ok(output) {
+			if ok, _ := IsFlag(a, "-i", "--in"); ok {
+				input = t
+			} else {
+				output = t
+			}
+		} else {
+			return FlagError(fileTypesErr, a)
 		}
 	}
 
@@ -91,11 +95,15 @@ func (c *UpdateCommand) Run(args []string) error {
 	}
 
 	for len(args) > 0 {
-		var is bool
+		var (
+			is   bool
+			path string
+			data []byte
+		)
 
 		if a, args = NextFlag(args); Empty(a) {
 			return FlagRequiredError("operation")
-		} else if is, ops = IsFlag(a, operationFlags...); !is {
+		} else if is, ops = IsFlag(a, updateOperations...); !is {
 			return FlagUnknownError(ops[0])
 		}
 
@@ -103,23 +111,28 @@ func (c *UpdateCommand) Run(args []string) error {
 			return ArgRequiredError("path", "json")
 		}
 
-		if b, args = NextArg(args); Empty(b) {
-			operations = append(operations, &Operation{ops, "/", a})
+		name := fmt.Sprintf("Op#%d", o)
+
+		if b, args = NextArg(args); Ok(b) {
+			path = a
+			data = []byte(b)
 		} else {
-			operations = append(operations, &Operation{ops, a, b})
+			path = "/"
+			data = []byte(a)
 		}
+
+		// TODO: read data from @file.ext arg
+
+		if src, err := newSource(name, path, ops, data); err != nil {
+			return err
+		} else {
+			sources = append(sources, src)
+		}
+
+		o++
 	}
 
-	// TODO: update config file
-
-	fmt.Printf("input: %s\n", target)
-	fmt.Printf("output: %s\n", output)
-
-	for _, o := range operations {
-		fmt.Printf("%q: %q %v\n", o.Ops, o.Path, o.Json)
-	}
-
-	return nil
+	return updateFile(os.Stdout, target, input, output, sources)
 }
 
 func (c *UpdateCommand) Flags() []*Flag {
@@ -135,28 +148,107 @@ var Update = &UpdateCommand{
 
 	flags: []*Flag{
 		{
-			Name: "-t, --type",
-			Desc: fmt.Sprintf("output file as `t` (%s)", outputTypesStr),
+			Name: "-i, --in",
+			Desc: fmt.Sprintf("read target as `t` (%s)", fileTypesStr),
+		},
+		{
+			Name: "-o, --out",
+			Desc: fmt.Sprintf("output as `t` (%s)", fileTypesStr),
 		},
 	},
 
 	ops: []*Flag{
-		{Name: "-s, --set", Desc: "set value at path"},
-		{Name: "-m, --merge", Desc: "merge with value at path"},
-		{Name: "-a, --append", Desc: "append array values (modifier)"},
+		{Name: "-s", Desc: "set new values only"},
+		{Name: "-m", Desc: "merge values"},
+		{Name: "-a", Desc: `concatenate array values (implies "-m")`},
+		{Name: "-u", Desc: `drop duplicate array values (implies "-a")`},
 	},
+}
+
+// Create new cfg.Source based on parameters from cmd line.
+func newSource(n, p string, ops []string, js []byte) (s *cfg.Source, err error) {
+	var (
+		kind reflect.Kind
+		file *cfg.File
+		data interface{}
+		dmap map[string]interface{}
+		opts = make([]func(*mergo.Config), 0, len(ops))
+	)
+
+	p = strings.Trim(p, "/")
+
+	if err = json.Unmarshal(js, &data); err != nil {
+		return
+	}
+
+	kind = reflect.TypeOf(data).Kind()
+
+	if p == "" && kind != reflect.Map {
+		return nil, fmt.Errorf("json must be a map if path is empty")
+	} else {
+		dmap = cfg.PointerToMap(p, data)
+	}
+
+	file = &cfg.File{
+		Path: n,
+		Data: dmap,
+	}
+
+	for _, op := range ops {
+		switch op {
+		case "a", "u":
+			opts = append(opts, mergo.WithOverride, mergo.WithAppendSlice)
+			// TODO: "u" operation: drop duplicates transformer
+		case "m":
+			opts = append(opts, mergo.WithOverride)
+		}
+	}
+
+	return &cfg.Source{
+		File:    file,
+		Options: opts,
+	}, nil
+}
+
+// update config file from given sources and write updated
+// data as given type to the writer.
+func updateFile(w io.Writer, p, in, out string, s []*cfg.Source) (err error) {
+	var file *cfg.File
+
+	if file, err = cfg.ReadFile(p); err != nil {
+		return err
+	}
+
+	// TODO: output as `out`
+
+	if err = file.MergeSource(s...); err != nil {
+		return err
+	} else {
+		var b []byte
+
+		if b, err = json.MarshalIndent(file.Data, "", "  "); err != nil {
+			return
+		} else {
+			_, err = w.Write(b)
+		}
+	}
+
+	return
 }
 
 func init() {
 	var b strings.Builder
 
 	b.WriteString("\nOperation:\n")
-
 	for _, op := range Update.ops {
 		WriteFlagUsage(&b, op)
 	}
+	b.WriteString(updateExtraInfo)
 
-	b.WriteString(updateCommandInfo)
+	updateExtraHelp = b.String()
+	updateOperations = make([]string, len(Update.ops))
 
-	updateCommandHelp = b.String()
+	for i, f := range Update.ops {
+		updateOperations[i] = f.Name
+	}
 }
