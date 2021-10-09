@@ -3,10 +3,13 @@ package cfg
 
 import (
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
+	"path"
 	"strings"
 
 	"github.com/imdario/mergo"
+	"gopkg.in/yaml.v3"
 )
 
 type File struct {
@@ -14,22 +17,54 @@ type File struct {
 	Data map[string]interface{}
 }
 
-func ReadBytes(content []byte, path string) (*File, error) {
-	var data map[string]interface{}
+type unmarshaller func([]byte, interface{}) error
 
-	// TODO: read YAML files
-	if err := json.Unmarshal(content, &data); err != nil {
-		return nil, err
-	} else {
-		return &File{path, data}, nil
-	}
+var unmarshallers = map[string]unmarshaller{
+	".json": json.Unmarshal,
+	".yaml": yaml.Unmarshal,
 }
 
-func ReadFile(path string) (*File, error) {
-	if content, err := ioutil.ReadFile(path); err != nil {
+func ReadBytes(content []byte, p string, ts ...string) (*File, error) {
+	var (
+		fns  []unmarshaller
+		err  error
+		data map[string]interface{}
+	)
+
+	if len(ts) == 0 {
+		ts = []string{path.Ext(p)}
+	}
+
+	fns = make([]unmarshaller, 0, len(ts))
+
+	for _, t := range ts {
+		if t[0] != '.' {
+			t = "." + t
+		}
+
+		if fn := unmarshallers[t]; fn != nil {
+			fns = append(fns, fn)
+		}
+	}
+
+	if len(fns) == 0 {
+		return nil, fmt.Errorf("unknown config file type: %q", ts)
+	}
+
+	for _, fn := range fns {
+		if err = fn(content, &data); err == nil {
+			return &File{p, data}, nil
+		}
+	}
+
+	return nil, err
+}
+
+func ReadFile(p string, t ...string) (*File, error) {
+	if content, err := ioutil.ReadFile(p); err != nil {
 		return nil, err
 	} else {
-		return ReadBytes(content, path)
+		return ReadBytes(content, p, t...)
 	}
 }
 
@@ -58,31 +93,31 @@ type Source struct {
 }
 
 func ReadSourceBytes(
-	content []byte,
-	path string,
+	data []byte,
+	p string,
 	opts ...func(*mergo.Config),
 ) (*Source, error) {
-	if file, err := ReadBytes(content, path); err != nil {
+	if file, err := ReadBytes(data, p); err != nil {
 		return nil, err
 	} else {
 		return &Source{file, opts}, nil
 	}
 }
 
-func ReadSourceFile(path string, opts ...func(*mergo.Config)) (*Source, error) {
-	if file, err := ReadFile(path); err != nil {
+func ReadSourceFile(p string, opts ...func(*mergo.Config)) (*Source, error) {
+	if file, err := ReadFile(p); err != nil {
 		return nil, err
 	} else {
 		return &Source{file, opts}, nil
 	}
 }
 
-func PointerToMap(pointer string, v interface{}) (mp map[string]interface{}) {
-	pointer = strings.Trim(pointer, "/")
+func PointerToMap(ptr string, v interface{}) (mp map[string]interface{}) {
+	ptr = strings.Trim(ptr, "/")
 
-	if pointer != "" {
+	if ptr != "" {
 		mp = make(map[string]interface{}, 1)
-		p := strings.SplitN(pointer, "/", 2)
+		p := strings.SplitN(ptr, "/", 2)
 
 		if len(p) == 2 {
 			mp[p[0]] = PointerToMap(p[1], v)

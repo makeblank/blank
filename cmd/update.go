@@ -4,12 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"io/ioutil"
 	"os"
 	"reflect"
 	"strings"
 
 	"github.com/imdario/mergo"
 	"github.com/makeblank/blank/cfg"
+	"gopkg.in/yaml.v3"
 
 	. "github.com/makeblank/blank/arg"
 	. "github.com/makeblank/blank/std"
@@ -43,7 +45,14 @@ var (
 	fileTypes    = []string{"json", "yaml"}
 	fileTypesStr = strings.Join(fileTypes, ", ")
 	fileTypesErr = fmt.Sprintf("must be: %s", fileTypesStr)
+
+	marshallers = map[string]marshal{
+		"json": jsonMarshal,
+		"yaml": yaml.Marshal,
+	}
 )
+
+type marshal func(interface{}) ([]byte, error)
 
 // The "update" subcommand type.
 type UpdateCommand struct {
@@ -68,25 +77,28 @@ func (c *UpdateCommand) Help() string {
 
 func (c *UpdateCommand) Run(args []string) error {
 	var (
-		target, a, b, t string
-		ops             []string
-		sources         []*cfg.Source
-		input           = "json"
-		output          = "json"
-		o               = 0
+		target, a, t string
+		sources      []*cfg.Source
+		input        = "json"
+		output       = "json"
+		o            = 0
 	)
 
 	sources = make([]*cfg.Source, 0)
 
-	if a, args = NextFlag(args, "-io", "--in", "--out"); Ok(a) {
-		if t, args = NextArg(args, fileTypes...); Ok(output) {
-			if ok, _ := IsFlag(a, "-i", "--in"); ok {
-				input = t
-			} else {
-				output = t
-			}
-		} else {
+	for len(args) > 0 {
+		if a, args = NextFlag(args, "-io", "--in", "--out"); Empty(a) {
+			break
+		}
+
+		if t, args = NextArg(args, fileTypes...); Empty(t) {
 			return FlagError(fileTypesErr, a)
+		}
+
+		if ok, _ := IsFlag(a, "-i", "--in"); ok {
+			input = t
+		} else {
+			output = t
 		}
 	}
 
@@ -96,9 +108,11 @@ func (c *UpdateCommand) Run(args []string) error {
 
 	for len(args) > 0 {
 		var (
-			is   bool
-			path string
-			data []byte
+			b, path, src string
+			data         []byte
+			ops          []string
+			err          error
+			is           bool
 		)
 
 		if a, args = NextFlag(args); Empty(a) {
@@ -115,13 +129,19 @@ func (c *UpdateCommand) Run(args []string) error {
 
 		if b, args = NextArg(args); Ok(b) {
 			path = a
-			data = []byte(b)
+			src = b
 		} else {
 			path = "/"
-			data = []byte(a)
+			src = a
 		}
 
-		// TODO: read data from @file.ext arg
+		if src[0] == '@' {
+			if data, err = ioutil.ReadFile(src[1:]); err != nil {
+				return err
+			}
+		} else {
+			data = []byte(src)
+		}
 
 		if src, err := newSource(name, path, ops, data); err != nil {
 			return err
@@ -165,13 +185,13 @@ var Update = &UpdateCommand{
 	},
 }
 
-// Create new cfg.Source based on parameters from cmd line.
+// Create new cfg.Source based on operations from cmd line.
 func newSource(n, p string, ops []string, js []byte) (s *cfg.Source, err error) {
 	var (
 		kind reflect.Kind
 		file *cfg.File
 		data interface{}
-		dmap map[string]interface{}
+		map_ map[string]interface{}
 		opts = make([]func(*mergo.Config), 0, len(ops))
 	)
 
@@ -184,14 +204,14 @@ func newSource(n, p string, ops []string, js []byte) (s *cfg.Source, err error) 
 	kind = reflect.TypeOf(data).Kind()
 
 	if p == "" && kind != reflect.Map {
-		return nil, fmt.Errorf("json must be a map if path is empty")
+		return nil, fmt.Errorf("json must be an object if path is omitted")
 	} else {
-		dmap = cfg.PointerToMap(p, data)
+		map_ = cfg.PointerToMap(p, data)
 	}
 
 	file = &cfg.File{
 		Path: n,
-		Data: dmap,
+		Data: map_,
 	}
 
 	for _, op := range ops {
@@ -213,20 +233,25 @@ func newSource(n, p string, ops []string, js []byte) (s *cfg.Source, err error) 
 // update config file from given sources and write updated
 // data as given type to the writer.
 func updateFile(w io.Writer, p, in, out string, s []*cfg.Source) (err error) {
-	var file *cfg.File
+	var (
+		file *cfg.File
+		fn   marshal
+	)
 
-	if file, err = cfg.ReadFile(p); err != nil {
-		return err
+	if fn = marshallers[out]; fn == nil {
+		panic(fmt.Errorf("unknown config file type %s", out))
 	}
 
-	// TODO: output as `out`
+	if file, err = cfg.ReadFile(p, in); err != nil {
+		return err
+	}
 
 	if err = file.MergeSource(s...); err != nil {
 		return err
 	} else {
 		var b []byte
 
-		if b, err = json.MarshalIndent(file.Data, "", "  "); err != nil {
+		if b, err = fn(file.Data); err != nil {
 			return
 		} else {
 			_, err = w.Write(b)
@@ -234,6 +259,10 @@ func updateFile(w io.Writer, p, in, out string, s []*cfg.Source) (err error) {
 	}
 
 	return
+}
+
+func jsonMarshal(in interface{}) ([]byte, error) {
+	return json.MarshalIndent(in, "", " ")
 }
 
 func init() {
