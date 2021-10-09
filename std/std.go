@@ -2,7 +2,6 @@
 package std
 
 import (
-	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -63,14 +62,23 @@ func WriteEnvironment(out io.Writer, names ...string) {
 }
 
 // Write error message to stderr.
-func WriteError(v interface{}) {
-	var err error
+func WriteError(v ...interface{}) {
+	var (
+		h   interface{}
+		err error
+	)
 
-	switch t := v.(type) {
+	if len(v) == 0 {
+		return
+	}
+
+	h, v = v[0], v[1:]
+
+	switch t := h.(type) {
 	case error:
 		err = t
 	case string:
-		err = errors.New(t)
+		err = fmt.Errorf(t, v...)
 	default:
 		err = fmt.Errorf("%v", t)
 	}
