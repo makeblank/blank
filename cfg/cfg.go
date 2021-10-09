@@ -79,12 +79,9 @@ func (f *File) MergeSource(srcs ...*Source) error {
 
 func (f *File) MergeMap(
 	m map[string]interface{},
-	opts ...func(*mergo.Config),
+	o ...func(*mergo.Config),
 ) error {
-	if err := mergo.Merge(&f.Data, m, opts...); err != nil {
-		return err
-	}
-	return nil
+	return mergo.Merge(&f.Data, m, o...)
 }
 
 type Source struct {
@@ -93,22 +90,22 @@ type Source struct {
 }
 
 func ReadSourceBytes(
-	data []byte,
+	d []byte,
 	p string,
-	opts ...func(*mergo.Config),
+	o ...func(*mergo.Config),
 ) (*Source, error) {
-	if file, err := ReadBytes(data, p); err != nil {
+	if file, err := ReadBytes(d, p); err != nil {
 		return nil, err
 	} else {
-		return &Source{file, opts}, nil
+		return &Source{file, o}, nil
 	}
 }
 
-func ReadSourceFile(p string, opts ...func(*mergo.Config)) (*Source, error) {
+func ReadSourceFile(p string, o ...func(*mergo.Config)) (*Source, error) {
 	if file, err := ReadFile(p); err != nil {
 		return nil, err
 	} else {
-		return &Source{file, opts}, nil
+		return &Source{file, o}, nil
 	}
 }
 

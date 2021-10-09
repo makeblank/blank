@@ -181,7 +181,6 @@ var Update = &UpdateCommand{
 		{Name: "-s", Desc: "set new values only"},
 		{Name: "-m", Desc: "merge values"},
 		{Name: "-a", Desc: `concatenate array values (implies "-m")`},
-		{Name: "-u", Desc: `drop duplicate array values (implies "-a")`},
 	},
 }
 
@@ -216,9 +215,8 @@ func newSource(n, p string, ops []string, js []byte) (s *cfg.Source, err error) 
 
 	for _, op := range ops {
 		switch op {
-		case "a", "u":
+		case "a":
 			opts = append(opts, mergo.WithOverride, mergo.WithAppendSlice)
-			// TODO: "u" operation: drop duplicates transformer
 		case "m":
 			opts = append(opts, mergo.WithOverride)
 		}
