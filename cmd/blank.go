@@ -94,6 +94,8 @@ func (c *BlankCommand) Run(args []string) error {
 				RunWithHelp(cmd, args, c.Name())
 				return nil
 			}
+
+			args = append([]string{a}, args...)
 		}
 
 		// 'make' as default command
